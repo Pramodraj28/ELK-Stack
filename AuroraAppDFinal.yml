@@ -1,0 +1,495 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  CloudFormation template to deploy AppDynamic Controller, Enterprise Console,
+  and Aurora MySQL with required configurations.
+Parameters:
+  ControllerInstanceType:
+    Type: String
+    Default: t2.medium
+    Description: EC2 instance type for AppDynamic Controller
+  ConsoleInstanceType:
+    Type: String
+    Default: t2.medium
+    Description: EC2 instance type for AppDynamic Console
+  EUMInstanceType:
+    Type: String
+    Default: t2.medium
+    Description: EC2 instance type for AppDynamic EUM
+  EUSInstanceType:
+    Type: String
+    Default: t2.medium
+    Description: EC2 instance type for AppDynamic EUS
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.medium
+    Description: DB instance class for Aurora
+  DBName:
+    Type: String
+    Default: AppDynamicDB
+    Description: Name of the database to create
+  DBUsername:
+    Type: String
+    Default: admin
+    AllowedPattern: "^[a-zA-Z][a-zA-Z0-9_]*$"
+    Description: Database master username
+  DBPassword:
+    Type: String
+    NoEcho: true
+    Default: jncq983j3kjr33i
+    AllowedPattern: "^[a-zA-Z][a-zA-Z0-9_]*$"
+    Description: Database master password
+  ListenerCertificateArn:
+    Type: String
+    Default: >-
+      arn:aws:acm:ap-northeast-1:837639066216:certificate/4b864f1b-e145-466f-99da-c9bf411e1c3d
+    Description: ARN of the SSL certificate for the Application Load Balancer
+  ImageId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: /AIS/AMI/AmazonLinux2/Id
+    Description: AMI Id
+
+Resources:
+  AppDynamicECSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Security group for AppDynamic Enterprise Console
+      VpcId:
+        Fn::ImportValue: ais-provided-vpc-VPCID
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 9191
+          ToPort: 9191
+          CidrIp: 0.0.0.0/0
+
+  AppDynamicAppServerSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Security group for AppDynamic Controller Appserver
+      VpcId:
+        Fn::ImportValue: ais-provided-vpc-VPCID
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 8090
+          ToPort: 8097
+  AppDynamicEUMSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Security group for AppDynamic EUM
+      VpcId:
+        Fn::ImportValue: ais-provided-vpc-VPCID
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+  AppDynamicEUSSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Security group for AppDynamic EUM
+      VpcId:
+        Fn::ImportValue: ais-provided-vpc-VPCID
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+  AppDynamicDBSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Security group for AppDynamic database instances
+      VpcId:
+        Fn::ImportValue: ais-provided-vpc-VPCID
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3388
+          ToPort: 3388
+          SourceSecurityGroupIds:
+            - !Ref AppDynamicAppServerSecurityGroup
+            - !Ref AppDynamicECSecurityGroup
+
+  AppDynamicELBSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Security group for load balancer in front of AppDynamic Controller
+      VpcId:
+        Fn::ImportValue: ais-provided-vpc-VPCID
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+  EUSAsg:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: 
+     - EUSEC2Template
+     - AppDynamicEUMSecurityGroup
+     - EUSInstanceProfile
+     - AppdInstanceRole
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateName: !Sub "${AWS::StackName}-EUSEC2Template"
+        Version: !GetAtt EUSEC2Template.LatestVersionNumber
+      # LaunchConfigurationName:
+      #   Ref: EUSLaunchConfiguration
+      MaxSize: 5
+      MinSize: 5
+      DesiredCapacity: 5
+      VPCZoneIdentifier:
+        - "{{resolve:ssm:/GNCS/0/Vpcs/0/denali-provided-private-subnet/0/Id:1}}"
+
+  EUSEC2Template:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName:  !Sub "${AWS::StackName}-EUSEC2Template"
+      LaunchTemplateData:
+        IamInstanceProfile:
+          Name: !Ref EUSInstanceProfile
+        ImageId:
+          Ref: ImageId
+        InstanceType:
+          Ref: EUSInstanceType
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeType: gp3
+              VolumeSize: '100'
+              DeleteOnTermination: 'true'
+              Encrypted: 'true'
+          - DeviceName: /dev/sdb
+            Ebs:
+              VolumeType: gp3
+              VolumeSize: '1000'
+              DeleteOnTermination: 'false'
+              Encrypted: 'true'        
+        SecurityGroupIds:
+          - Fn::ImportValue: ais-shared-services-sg-SS-SG
+          - Ref: AppDynamicEUSSecurityGroup
+  
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpPutResponseHopLimit: 2
+          HttpTokens: required
+          InstanceMetadataTags: enabled
+        TagSpecifications:
+          - ResourceType: "instance"
+            Tags:
+              - Key: "Name"
+                Value: !Sub "${AWS::StackName}-EUS"
+              - Key: "Cluster_Name"
+                Value: !Sub "${AWS::StackName}-Prod-APPD"
+              - Key: "Project"
+                Value: !Sub "${AWS::StackName}-Appd"
+              - Key: "Enviroment"
+                Value: !Sub "${AWS::StackName}-Prod"
+  AppdInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:aws:iam::${AWS::AccountId}:policy/AISSystemLogsPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess   
+      PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/ais-permissions-boundaries"
+      Tags:
+        - Key: ref_architecture_instance_id
+          Value: !Ref "AWS::StackName"
+ 
+  AppDynamicEUMSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription:
+        Fn::Sub: "${AWS::StackName} SG"
+      VpcId:
+        Fn::ImportValue: ais-provided-vpc-VPCID
+      SecurityGroupEgress:
+        - Description: Allow all outbound traffic
+          IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0     
+
+  EUSInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - Ref: AppdInstanceRole
+
+
+  AppDynamicEC2Role:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: AppDynamicEC2Role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - !Sub arn:aws:iam::${AWS::AccountId}:policy/AISSystemLogsPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess   
+      PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/ais-permissions-boundaries"
+      Tags:
+        - Key: ref_architecture_instance_id
+          Value: !Ref "AWS::StackName"
+ 
+
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for DB
+      SubnetIds:
+        - subnet-05d05e272998a5d19
+        - subnet-0cd6189ebbcc39204
+
+  AuroraDBCluster:
+    Type: 'AWS::RDS::DBCluster'
+    Properties:
+      Engine: aurora-mysql
+      EngineVersion: 8.0.mysql_aurora.3.03.0
+      DBClusterIdentifier: AppDynamicCluster
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBClusterParameterGroupName: !Ref CustomDBParameterGroup
+      VpcSecurityGroupIds:
+        - !Ref AppDynamicDBSecurityGroup
+      StorageEncrypted : true
+
+  CustomDBParameterGroup:
+    Type: AWS::RDS::DBClusterParameterGroup
+    Properties:
+      Description: Custom parameter group for Aurora MySQL
+      Family: aurora-mysql8.0
+      Parameters:
+        character_set_client: utf8
+        character_set_connection: utf8
+        character_set_database: utf8
+        character_set_filesystem: binary
+        character_set_results: utf8
+        character_set_server: utf8
+        collation_connection: utf8_general_ci
+        collation_server: utf8_unicode_ci
+        innodb_default_row_format: DYNAMIC
+        innodb_file_per_table: 1
+        lower_case_table_names: 1
+        innodb_lock_wait_timeout: 180
+        innodb_max_dirty_pages_pct: 20
+        log_bin_trust_function_creators: 1
+        max_allowed_packet: 104857600
+        max_heap_table_size: 1610612736
+        tmp_table_size: 67108864
+        wait_timeout: 31536000
+  
+  AuroraDBInstance:
+    Type: 'AWS::RDS::DBInstance'
+    Properties:
+      DBInstanceClass: !Ref DBInstanceClass
+      DBClusterIdentifier: !Ref AuroraDBCluster
+      Engine: aurora-mysql
+      PubliclyAccessible: false
+      StorageEncrypted : true
+     # DBInstanceRole: READER
+
+  AppDynamicENI:
+    Type: 'AWS::EC2::NetworkInterface'
+    Properties:
+      SubnetId: "{{resolve:ssm:/GNCS/0/Vpcs/0/denali-provided-enterprise-subnet/0/Id:1}}"
+      Description: ENI for AppDynamic Controller
+      GroupSet:
+        - !Ref AppDynamicECSecurityGroup
+        
+  AppDynamicEC2Instance:
+    Type: 'AWS::EC2::Instance'
+    DependsOn:
+      - AppDynamicTargetGroup
+    Properties:
+      InstanceType: !Ref ControllerInstanceType
+      ImageId: 
+        Ref: ImageId
+      SecurityGroupIds:
+        - !Ref AppDynamicECSecurityGroup
+      IamInstanceProfile: !Ref ControlInstanceProfile
+      #NetworkInterfaces:
+      #  - NetworkInterfaceId: !Ref AppDynamicENI
+      #    DeviceIndex: 0
+      SubnetId: "{{resolve:ssm:/GNCS/0/Vpcs/0/denali-provided-enterprise-subnet/0/Id:1}}"
+      UserData:
+        Fn::Base64: |
+          #! /bin/bash
+          yum update -y
+          yum install -y java-1.8.0-openjdk
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-Controller"
+
+  ControlInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - Ref: AppDynamicEC2Role
+
+  AppDynamicConsoleEC2Instance:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      InstanceType: !Ref ConsoleInstanceType
+      ImageId: !Ref ImageId
+      SecurityGroupIds:
+        - !Ref AppDynamicECSecurityGroup
+      SubnetId: "{{resolve:ssm:/GNCS/0/Vpcs/0/denali-provided-enterprise-subnet/0/Id:1}}"
+      #VPCZoneIdentifier:
+      #  - "{{resolve:ssm:/GNCS/0/Vpcs/0/denali-provided-private-subnet/0/Id:1}}"
+      IamInstanceProfile: !Ref ConsoleInstanceProfile
+      UserData:
+        Fn::Base64: |
+          #! /bin/bash
+          yum update -y
+          yum install -y java-1.8.0-openjdk
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-Console"
+
+  ConsoleInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - Ref: AppDynamicEC2Role
+
+  AppDynamicEUMInstance:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      InstanceType: !Ref EUMInstanceType
+      ImageId: !Ref ImageId
+      SecurityGroupIds:
+        - !Ref AppDynamicEUMSecurityGroup
+      SubnetId: "{{resolve:ssm:/GNCS/0/Vpcs/0/denali-provided-enterprise-subnet/0/Id:1}}"
+      #VPCZoneIdentifier:
+      #  - "{{resolve:ssm:/GNCS/0/Vpcs/0/denali-provided-private-subnet/0/Id:1}}"
+      IamInstanceProfile: !Ref EUMInstanceProfile
+      UserData:
+        Fn::Base64: |
+          #! /bin/bash
+          yum update -y
+          yum install -y java-1.8.0-openjdk
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-EUM"
+
+  EUMInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - Ref: AppDynamicEC2Role
+  AppDynamicEUSInstance:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      InstanceType: !Ref EUSInstanceType
+      ImageId: !Ref ImageId
+      SecurityGroupIds:
+        - !Ref AppDynamicEUSSecurityGroup
+      SubnetId: "{{resolve:ssm:/GNCS/0/Vpcs/0/denali-provided-enterprise-subnet/0/Id:1}}"
+      #VPCZoneIdentifier:
+      #  - "{{resolve:ssm:/GNCS/0/Vpcs/0/denali-provided-private-subnet/0/Id:1}}"
+      IamInstanceProfile: !Ref EUMInstanceProfile
+      UserData:
+        Fn::Base64: |
+          #! /bin/bash
+          yum update -y
+          yum install -y java-1.8.0-openjdk
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-EUS"
+
+  EUSInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - Ref: AppDynamicEC2Role
+          
+  AppDynamicLoadBalancer:
+    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+    Properties:
+      Name: AppDynamicLoadBalancer
+      Subnets:
+        - "{{resolve:ssm:/GNCS/0/Vpcs/0/denali-provided-enterprise-subnet/0/Id:1}}"
+        - "{{resolve:ssm:/GNCS/0/Vpcs/0/denali-provided-enterprise-subnet/1/Id:1}}"
+      SecurityGroups:
+        - !Ref AppDynamicECSecurityGroup
+      Scheme: internal
+
+  AppDynamicListener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Properties:
+      LoadBalancerArn:  !Ref AppDynamicLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn:  !Ref ListenerCertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn:  !Ref AppDynamicTargetGroup
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+
+  AppDynamicTargetGroup:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      VpcId:
+        Fn::ImportValue: ais-provided-vpc-VPCID
+      Port: 8090
+      Protocol: HTTP
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: '8090'
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      
+  #AppDynamicTargetGroupRegistration:
+  # Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+  #  Properties:
+  #    TargetGroupArn:  !Ref AppDynamicTargetGroup
+  #    Targets:
+  #      - Id:  !Ref AppDynamicEC2Instance
+  #        Port: 8090
+
+Outputs:
+  DBClusterEndpoint:
+    Description: Endpoint of the Aurora DB Cluster
+    Value: !GetAtt AuroraDBCluster.Endpoint.Address
+  AppDynamicEC2InstanceId:
+    Description: Instance ID of the AppDynamic EC2
+    Value:  !Ref AppDynamicEC2Instance
+  AppDynamicConsoleInstanceId:
+    Description: Instance ID of the AppDynamic Console EC2
+    Value:  !Ref AppDynamicConsoleEC2Instance
+  AppDynamicEUMInstanceId:
+    Description: Instance ID of the AppDynamic EC2
+    Value:  !Ref AppDynamicEUMInstance
+  AppDynamicEUSInstanceId:
+    Description: Instance ID of the AppDynamic EC2
+    Value:  !Ref AppDynamicEUSInstance
+  AuroraDBInstanceEndpoint:
+    Description: Endpoint of the Aurora DB Instance
+    Value: !GetAtt AuroraDBInstance.Endpoint.Address
+  LoadBalancerDNSName:
+    Description: DNS Name of the Application Load Balancer
+    Value: !GetAtt AppDynamicLoadBalancer.DNSName
+
+
