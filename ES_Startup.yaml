@@ -1,0 +1,42 @@
+schemaVersion: '2.2'
+description: >-
+  Elastic Search Rolling restart
+parameters:
+  commands:
+    type: String
+    description: "enable replica shard allocation"
+    default: |
+      CONTAINERS=$(docker ps -a -q --filter "status=exited")
+          if [ ! -z "$CONTAINERS" ]; then
+            echo "Starting stopped Docker containers."  >> /tmp/Docker_status.txt;
+            docker start $CONTAINERS
+          else
+            echo "No stopped Docker containers found." >> /tmp/Docker_status.txt;
+          fi
+      # Enable shard allocation
+          shard_acknowledged=$(curl -sk -u 'elastic':'!X^QAqpCJ3#?#eB=892=_++v%sw*9B' -XPUT -H "Content-Type: application/json" https://100.127.3.178:9200/_cluster/settings -d '{"persistent":{"cluster.routing.allocation.enable":"all"}}' | jq -r '.acknowledged')
+          echo "$shard_acknowledged" > /tmp/shard_enabled_status.txt
+          if [ "$shard_acknowledged" = "true" ]; then
+            echo "Shard allocation enabled successfully" >> /tmp/shard_enabled_status.txt;
+          else
+            echo "Failed to enable shard allocation, aborting" >> /tmp/shard_enabled_status.txt;
+            exit 1;
+          fi
+          cat /tmp/shard_enabled_status.txt
+
+      # Check cluster status until it becomes green
+          STATUS=""
+          while [ "$STATUS" != "green" ]; do
+              STATUS=$(curl -sk -u 'elastic':'!X^QAqpCJ3#?#eB=892=_++v%sw*9B' https://100.127.3.178:9200/_cluster/health | jq -r '.status')
+              echo "$(date): Cluster status is $STATUS"
+              sleep 60
+          done
+          echo "Cluster status is green. Script successful." > /tmp/final_status.txt
+          cat /tmp/final_status.txt
+          
+mainSteps:
+  - action: 'aws:runShellScript'
+    name: curlClusterHealth
+    inputs:
+      runCommand:
+        - "{{ commands }}"

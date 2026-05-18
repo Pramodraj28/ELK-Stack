@@ -1,0 +1,57 @@
+schemaVersion: '2.2'
+description: >-
+  Elastic Search Rebooting the EC2
+
+mainSteps:
+  
+  - action: 'aws:runShellScript'
+    name: rebootandstardocker
+    precondition:
+      StringEquals: ["platformType", "Linux"]
+    inputs:
+      runCommand:
+        - |
+            # Function to convert uptime in seconds to minutes
+            uptime_to_minutes() {
+              local uptime_secs="$1"
+              local uptime_mins=$((uptime_secs / 60))
+              echo "$uptime_mins"
+            }
+
+            # Get current uptime in seconds
+            current_uptime=$(cut -d '.' -f 1 /proc/uptime)
+
+            # Minimum uptime required (1 minute in seconds)
+            min_uptime=60
+
+            # Check if uptime is more than the minimum
+            if [[ $(uptime_to_minutes "$current_uptime") -ge 1 ]]; 
+            then
+              echo "System uptime is more than 1 minute. Killing containers and Initiating reboot..."
+              CONTAINERS=$(docker ps -q)
+              if [ ! -z "$CONTAINERS" ]; then
+                docker stop $CONTAINERS 
+              fi
+              uptime >> /tmp/test_beforereboot;
+              reboot
+              exit 194
+
+            else
+              echo "System uptime less than 1 minute. Checking services and starting containers... "
+              uptime >> /tmp/test_Afterreboot;
+              
+              docker=""
+              while [ "$docker" != "running" ]; do
+                docker=$(systemctl status docker | awk '/Active:/ {print $3}' | tr -d "[()]")
+                echo "$(date): docker status is $docker"
+              done
+              echo "docker service is active."
+              
+              CONTAINERS=$(docker ps -a -q --filter "status=exited")
+              if [ ! -z "$CONTAINERS" ]; then
+              echo "Starting stopped Docker containers."  >> /tmp/Docker_status.txt;
+              docker start $CONTAINERS
+              else
+              echo "No stopped Docker containers found." >> /tmp/Docker_status.txt;
+             fi
+            fi  

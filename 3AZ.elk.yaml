@@ -1,0 +1,553 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Stack creates ASGs with labeled nodes for manual scaling
+Transform: AppleTaggingStandard
+
+Parameters:
+  InstanceType:
+    Description: Instance type to launch
+    Type: String
+    Default: m5d.16xlarge
+  ImageId:
+    Description: AMI Id
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /AIS/AMI/AmazonLinux2/Id
+  AZNumber:
+    Description: The Index which defines the Availability Zone to use (1, 2, or 3)
+    Type: Number
+    AllowedValues: [1, 2, 3]
+    Default: 1
+  IsDenaliEnabled:
+    Type: String
+    Default: true
+    
+Conditions:
+  IsDenaliEnabled: !Equals
+    - !Ref IsDenaliEnabled
+    - "true"
+    
+Resources:
+  # Master Node ASG
+  MasterASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+    IamInstanceProfile:
+        Ref: MasterAZ1InstanceProfile
+      ImageId:
+        Ref: ImageId
+      InstanceType:
+        Ref: InstanceType
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp2
+            VolumeSize: '30'
+            DeleteOnTermination: 'false'
+            Encrypted: 'true'
+     LaunchTemplate:
+        LaunchTemplateId: !Ref EC2LaunchTemplate
+        Version: !GetAtt EC2LaunchTemplate.LatestVersionNumber
+      MinSize: 1
+      MaxSize: 1
+      DesiredCapacity: 1
+      VPCZoneIdentifier:
+        - !If
+          - IsDenaliEnabled
+          - "{{resolve:ssm:/GNCS/0/Vpcs/0/denali-provided-private-subnet/1:Id}}"
+          - !ImportValue: "Fn::Sub": "ais-provided-vpc-PrivSubnet${AZNumber}"
+      SecurityGroupIds:
+        - Fn::ImportValue: ais-shared-services-sg-SS-SG
+        - Ref: MasterAZ1SecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-master-asg"
+        - Key: Node_Type
+          Value: Master 
+            UserData:
+        Fn::Base64: |
+          #! /bin/bash
+          set -eux          
+          # Set default region
+          TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+          REGION=$(curl -sH "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone | sed s'/.$//')
+          AZ=$(curl -sH "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+          aws configure set region $REGION
+          mkdir -p /data1 /data2
+          pvcreate /dev/nvme1n1 /dev/nvme2n1 /dev/nvme3n1 /dev/nvme4n1
+          vgcreate data1vg /dev/nvme1n1 /dev/nvme2n1
+          lvcreate -l 100%FREE -n data1 data1vg
+          mkfs.xfs -L data1 /dev/mapper/data1vg-data1
+          mount LABEL=data1 /data1
+          sudo chmod 777 /data1
+          UUID1=$(blkid /dev/mapper/data1vg-data1 | awk '{print $3}' | sed -e 's/"//g')
+          echo "$UUID1              /data1           xfs    defaults         0 0" >> /etc/fstab
+          vgcreate data2vg /dev/nvme3n1 /dev/nvme4n1
+          lvcreate -l 100%FREE -n data2 data2vg
+          mkfs.xfs -L data2 /dev/mapper/data2vg-data2
+          mount LABEL=data2 /data2
+          sudo chmod 777 /data1
+          UUID2=$(blkid /dev/mapper/data2vg-data2 | awk '{print $3}' | sed -e 's/"//g')
+          echo "$UUID2              /data2           xfs    defaults         0 0" >> /etc/fstab
+          echo "Installing docker"
+          sudo yum install -y docker
+          echo "Installing narrative (mezu)"
+          sudo yum install --nogpgcheck -y https://artifacts.apple.com/artifactory/narrative-yum-local/7/prod/x86_64/narrative-client-0.10.0-1.x86_64.rpm
+          cat > /etc/narrative.conf <<EOF
+          url: https://narrative.apple.com/v1
+          directory: /narrative
+          identities:
+            - chown_group: "10000"
+              chown_user: "10000"
+              domain: aws
+              identity_attestor: awsiid
+              key_algorithm: ECC-P256
+              key_residency: soft
+              name_autodetect: true
+              ref: platform
+              type: platform
+          EOF
+          rm -rf /narrative/platform
+          echo 'tmpfs   /narrative         tmpfs   nodev,nosuid,noexec,size=24M     0  0' >> /etc/fstab
+          mount -a
+          groupadd -g 10000 10000
+          useradd 10000 -u 10000 -g 10000
+          chown 10000:10000 /narrative
+          systemctl enable narrative-client.service
+          systemctl enable narrative-client.timer
+          systemctl start --no-block narrative-client.service
+          systemctl start --no-block narrative-client.timer
+          systemctl status narrative-client.service -l
+          systemctl status narrative-client.timer -l
+          mkdir /run/mezu
+          echo "d /run/mezu 0755 root root - -" > /etc/tmpfiles.d/mezu.conf
+          ctr oci spec | jq '.mounts += [{ "destination": "/run/mezu", "type": "bind", "source": "/run/mezu", "options": [ "bind", "rw" ] }]' > /etc/containerd/cri-mezu.json
+          sed -i '/.containerd.runtimes.runc/ a base_runtime_spec = "/etc/containerd/cri-mezu.json"' /etc/containerd/config.toml 
+          sed -i 's/LimitNOFILE=infinity/LimitNOFILE=65535/g' /usr/lib/systemd/system/containerd.service
+          if [[ `grep 'RLIMIT_NOFILE' /etc/containerd/cri-mezu.json` ]]; then sed -i 's/1024/1048576/g' /etc/containerd/cri-mezu.json; fi
+          # if [[ `grep '1024' /etc/containerd/cri-mezu.json` ]]; then sed -i '59,65d' /etc/containerd/cri-mezu.json; fi
+          echo "Installing docker"
+          sudo yum install docker -y
+          systemctl daemon-reload
+          systemctl restart containerd
+          sed -i '/Service\]$/a EnvironmentFile=/etc/environment' /etc/eks/containerd/sandbox-image.service
+          cat > /etc/osquery/osquery.flags <<EOF
+          --tls_hostname=osqueryd.dslb.apple.com
+          --config_plugin=tls
+          --config_tls_endpoint=/config?extensions.ais_audit_client=1&host=i-instance-id&module.osquery.os=linux&module.osquery.group=633318022522&module.osquery.owner=insight_sa@group.apple.com
+          --config_tls_max_attempts=10
+          --config_refresh=1800
+          --enroll_tls_endpoint=/enroll
+          --disable_extensions=false
+          --extension=/var/osquery/extensions/ais_audit_client.ext
+          EOF
+          sed -i "s/host=.*&/host=$(ec2-metadata -i | cut -d\  -f2)\&/g" /etc/osquery/osquery.flags
+          systemctl enable osqueryd.service
+          systemctl restart osqueryd.service
+
+  EC2LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpPutResponseHopLimit: 2
+          HttpTokens: required
+
+  DataAZ1SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription:
+        Fn::Sub: "${AWS::StackName} SG"
+      VpcId:
+        Fn::ImportValue: ais-provided-vpc-VPCID
+      SecurityGroupEgress:
+        - Description: Allow all outbound traffic
+          IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: ref_architecture
+          Value: examples/3_instances
+        - Key: ref_architecture_tooling
+          Value: cft
+        - Key: ref_architecture_version
+          Value: "2020-12-03"
+        - Key: ref_architecture_instance_id
+          Value: !Ref "AWS::StackName"
+  DataAZ1InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - Ref: DataAZ1InstanceRole
+
+  DataAZ1InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - Fn::Sub: arn:aws:iam::${AWS::AccountId}:policy/AISSystemLogsPolicy
+        - Fn::Sub: arn:aws:iam::${AWS::AccountId}:policy/elastic-snapshot-testing-full
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/ais-permissions-boundaries"
+      Tags:
+        - Key: ref_architecture
+          Value: examples/3_instances
+        - Key: ref_architecture_tooling
+          Value: cft
+        - Key: ref_architecture_version
+          Value: "2020-12-03"
+        - Key: ref_architecture_instance_id
+          Value: !Ref "AWS::StackName"
+          
+  # Data Node ASG
+  DataASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      IamInstanceProfile:
+        Ref: DataAZ2InstanceProfile
+      ImageId:
+        Ref: ImageId
+      InstanceType:
+        Ref: InstanceType
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp2
+            VolumeSize: '30'
+            DeleteOnTermination: 'false'
+            Encrypted: 'true'
+      LaunchTemplate:
+        LaunchTemplateId: !Ref EC2LaunchTemplate
+        Version: !GetAtt EC2LaunchTemplate.LatestVersionNumber
+      MinSize: 0
+      MaxSize: 5
+      DesiredCapacity: 2
+      VPCZoneIdentifier:
+        - !If
+          - IsDenaliEnabled
+          - "{{resolve:ssm:/GNCS/0/Vpcs/0/denali-provided-private-subnet/1:Id}}"
+          - !ImportValue: "Fn::Sub": "ais-provided-vpc-PrivSubnet${AZNumber}"
+      SecurityGroupIds:
+        - Fn::ImportValue: ais-shared-services-sg-SS-SG
+        - Ref: DataAZ2SecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-data-asg"
+        - Key: Node_Type
+          Value: Data
+      UserData:
+        Fn::Base64: !Sub |
+          #! /bin/bash
+          set -eux          
+          # Set default region
+          TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+          REGION=$(curl -sH "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone | sed s'/.$//')
+          AZ=$(curl -sH "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+          aws configure set region $REGION
+          mkdir -p /data1 /data2
+          pvcreate /dev/nvme1n1 /dev/nvme2n1 /dev/nvme3n1 /dev/nvme4n1
+          vgcreate data1vg /dev/nvme1n1 /dev/nvme2n1
+          lvcreate -l 100%FREE -n data1 data1vg
+          mkfs.xfs -L data1 /dev/mapper/data1vg-data1
+          mount LABEL=data1 /data1
+          sudo chmod 777 /data1
+          UUID1=$(blkid /dev/mapper/data1vg-data1 | awk '{print $3}' | sed -e 's/"//g')
+          echo "$UUID1              /data1           xfs    defaults         0 0" >> /etc/fstab
+          vgcreate data2vg /dev/nvme3n1 /dev/nvme4n1
+          lvcreate -l 100%FREE -n data2 data2vg
+          mkfs.xfs -L data2 /dev/mapper/data2vg-data2
+          mount LABEL=data2 /data2
+          sudo chmod 777 /data1
+          UUID2=$(blkid /dev/mapper/data2vg-data2 | awk '{print $3}' | sed -e 's/"//g')
+          echo "$UUID2              /data2           xfs    defaults         0 0" >> /etc/fstab
+          echo "Installing docker"
+          sudo yum install docker -y
+          cat > /etc/narrative.conf <<EOF
+          url: https://narrative.apple.com/v1
+          directory: /narrative
+          identities:
+            - chown_group: "10000"
+              chown_user: "10000"
+              domain: aws
+              identity_attestor: awsiid
+              key_algorithm: ECC-P256
+              key_residency: soft
+              name_autodetect: true
+              ref: platform
+              type: platform
+          EOF
+          rm -rf /narrative/platform
+          echo 'tmpfs   /narrative         tmpfs   nodev,nosuid,noexec,size=24M     0  0' >> /etc/fstab
+          mount -a
+          groupadd -g 10000 10000
+          useradd 10000 -u 10000 -g 10000
+          chown 10000:10000 /narrative
+          systemctl enable narrative-client.service
+          systemctl enable narrative-client.timer
+          systemctl start --no-block narrative-client.service
+          systemctl start --no-block narrative-client.timer
+          systemctl status narrative-client.service -l
+          systemctl status narrative-client.timer -l
+          mkdir /run/mezu
+          echo "d /run/mezu 0755 root root - -" > /etc/tmpfiles.d/mezu.conf
+          ctr oci spec | jq '.mounts += [{ "destination": "/run/mezu", "type": "bind", "source": "/run/mezu", "options": [ "bind", "rw" ] }]' > /etc/containerd/cri-mezu.json
+          sed -i '/.containerd.runtimes.runc/ a base_runtime_spec = "/etc/containerd/cri-mezu.json"' /etc/containerd/config.toml 
+          sed -i 's/LimitNOFILE=infinity/LimitNOFILE=65535/g' /usr/lib/systemd/system/containerd.service
+          if [[ `grep 'RLIMIT_NOFILE' /etc/containerd/cri-mezu.json` ]]; then sed -i 's/1024/1048576/g' /etc/containerd/cri-mezu.json; fi
+          # if [[ `grep '1024' /etc/containerd/cri-mezu.json` ]]; then sed -i '59,65d' /etc/containerd/cri-mezu.json; fi
+          systemctl daemon-reload
+          systemctl restart containerd
+          sed -i '/Service\]$/a EnvironmentFile=/etc/environment' /etc/eks/containerd/sandbox-image.service
+          cat > /etc/osquery/osquery.flags <<EOF
+          --tls_hostname=osqueryd.dslb.apple.com
+          --config_plugin=tls
+          --config_tls_endpoint=/config?extensions.ais_audit_client=1&host=i-instance-id&module.osquery.os=linux&module.osquery.group=633318022522&module.osquery.owner=insight_sa@group.apple.com
+          --config_tls_max_attempts=10
+          --config_refresh=1800
+          --enroll_tls_endpoint=/enroll
+          --disable_extensions=false
+          --extension=/var/osquery/extensions/ais_audit_client.ext
+          EOF
+          sed -i "s/host=.*&/host=$(ec2-metadata -i | cut -d\  -f2)\&/g" /etc/osquery/osquery.flags
+          systemctl enable osqueryd.service
+          systemctl restart osqueryd.service
+
+  DataAZ2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription:
+        Fn::Sub: "${AWS::StackName} SG"
+      VpcId:
+        Fn::ImportValue: ais-provided-vpc-VPCID
+      SecurityGroupEgress:
+        - Description: Allow all outbound traffic
+          IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: ref_architecture
+          Value: examples/3_instances
+        - Key: ref_architecture_tooling
+          Value: cft
+        - Key: ref_architecture_version
+          Value: "2020-12-03"
+        - Key: ref_architecture_instance_id
+          Value: !Ref "AWS::StackName"
+  DataAZ2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - Ref: DataAZ2InstanceRole
+
+  DataAZ2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - Fn::Sub: arn:aws:iam::${AWS::AccountId}:policy/AISSystemLogsPolicy
+        - Fn::Sub: arn:aws:iam::${AWS::AccountId}:policy/elastic-snapshot-testing-full
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/ais-permissions-boundaries"
+      Tags:
+        - Key: ref_architecture
+          Value: examples/3_instances
+        - Key: ref_architecture_tooling
+          Value: cft
+        - Key: ref_architecture_version
+          Value: "2020-12-03"
+        - Key: ref_architecture_instance_id
+          Value: !Ref "AWS::StackName"
+  
+  # Coordinator Node ASG
+  CoordinatorASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      IamInstanceProfile:
+        Ref: DataAZ3InstanceProfile
+      ImageId:
+        Ref: ImageId
+      InstanceType:
+        Ref: InstanceType
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp2
+            VolumeSize: '30'
+            DeleteOnTermination: 'false'
+            Encrypted: 'true'
+      LaunchTemplate:
+        LaunchTemplateId: !Ref EC2LaunchTemplate
+        Version: !GetAtt EC2LaunchTemplate.LatestVersionNumber
+      MinSize: 0
+      MaxSize: 2
+      DesiredCapacity: 1
+      VPCZoneIdentifier:
+        - !If
+          - IsDenaliEnabled
+          - "{{resolve:ssm:/GNCS/0/Vpcs/0/denali-provided-private-subnet/1:Id}}"
+          - !ImportValue: "Fn::Sub": "ais-provided-vpc-PrivSubnet${AZNumber}"
+      SecurityGroupIds:
+        - Fn::ImportValue: ais-shared-services-sg-SS-SG
+        - Ref: DataAZ3SecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-coordinator-asg"
+        - Key: Node_Type
+          Value: Coordinator
+      
+      UserData:
+        Fn::Base64: !Sub |
+          #! /bin/bash
+          set -eux          
+          # Set default region
+          TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+          REGION=$(curl -sH "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone | sed s'/.$//')
+          AZ=$(curl -sH "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+          aws configure set region $REGION
+          mkdir -p /data1 /data2
+          pvcreate /dev/nvme1n1 /dev/nvme2n1 /dev/nvme3n1 /dev/nvme4n1
+          vgcreate data1vg /dev/nvme1n1 /dev/nvme2n1
+          lvcreate -l 100%FREE -n data1 data1vg
+          mkfs.xfs -L data1 /dev/mapper/data1vg-data1
+          mount LABEL=data1 /data1
+          sudo chmod 777 /data1
+          UUID1=$(blkid /dev/mapper/data1vg-data1 | awk '{print $3}' | sed -e 's/"//g')
+          echo "$UUID1              /data1           xfs    defaults         0 0" >> /etc/fstab
+          vgcreate data2vg /dev/nvme3n1 /dev/nvme4n1
+          lvcreate -l 100%FREE -n data2 data2vg
+          mkfs.xfs -L data2 /dev/mapper/data2vg-data2
+          mount LABEL=data2 /data2
+          sudo chmod 777 /data1
+          UUID2=$(blkid /dev/mapper/data2vg-data2 | awk '{print $3}' | sed -e 's/"//g')
+          echo "$UUID2              /data2           xfs    defaults         0 0" >> /etc/fstab
+          echo "Installing docker"
+          sudo yum install -y docker
+          echo "Installing narrative (mezu)"
+          sudo yum install --nogpgcheck -y https://artifacts.apple.com/artifactory/narrative-yum-local/7/prod/x86_64/narrative-client-0.10.0-1.x86_64.rpm
+          cat > /etc/narrative.conf <<EOF
+          url: https://narrative.apple.com/v1
+          directory: /narrative
+          identities:
+            - chown_group: "10000"
+              chown_user: "10000"
+              domain: aws
+              identity_attestor: awsiid
+              key_algorithm: ECC-P256
+              key_residency: soft
+              name_autodetect: true
+              ref: platform
+              type: platform
+          EOF
+          rm -rf /narrative/platform
+          echo 'tmpfs   /narrative         tmpfs   nodev,nosuid,noexec,size=24M     0  0' >> /etc/fstab
+          mount -a
+          groupadd -g 10000 10000
+          useradd 10000 -u 10000 -g 10000
+          chown 10000:10000 /narrative
+          systemctl enable narrative-client.service
+          systemctl enable narrative-client.timer
+          systemctl start --no-block narrative-client.service
+          systemctl start --no-block narrative-client.timer
+          systemctl status narrative-client.service -l
+          systemctl status narrative-client.timer -l
+          mkdir /run/mezu
+          echo "d /run/mezu 0755 root root - -" > /etc/tmpfiles.d/mezu.conf
+          ctr oci spec | jq '.mounts += [{ "destination": "/run/mezu", "type": "bind", "source": "/run/mezu", "options": [ "bind", "rw" ] }]' > /etc/containerd/cri-mezu.json
+          sed -i '/.containerd.runtimes.runc/ a base_runtime_spec = "/etc/containerd/cri-mezu.json"' /etc/containerd/config.toml 
+          sed -i 's/LimitNOFILE=infinity/LimitNOFILE=65535/g' /usr/lib/systemd/system/containerd.service
+          if [[ `grep 'RLIMIT_NOFILE' /etc/containerd/cri-mezu.json` ]]; then sed -i 's/1024/1048576/g' /etc/containerd/cri-mezu.json; fi
+          # if [[ `grep '1024' /etc/containerd/cri-mezu.json` ]]; then sed -i '59,65d' /etc/containerd/cri-mezu.json; fi
+          systemctl daemon-reload
+          systemctl restart containerd
+          sed -i '/Service\]$/a EnvironmentFile=/etc/environment' /etc/eks/containerd/sandbox-image.service
+          cat > /etc/osquery/osquery.flags <<EOF
+          --tls_hostname=osqueryd.dslb.apple.com
+          --config_plugin=tls
+          --config_tls_endpoint=/config?extensions.ais_audit_client=1&host=i-instance-id&module.osquery.os=linux&module.osquery.group=633318022522&module.osquery.owner=insight_sa@group.apple.com
+          --config_tls_max_attempts=10
+          --config_refresh=1800
+          --enroll_tls_endpoint=/enroll
+          --disable_extensions=false
+          --extension=/var/osquery/extensions/ais_audit_client.ext
+          EOF
+          sed -i "s/host=.*&/host=$(ec2-metadata -i | cut -d\  -f2)\&/g" /etc/osquery/osquery.flags
+          systemctl enable osqueryd.service
+          systemctl restart osqueryd.service
+
+  DataAZ3SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription:
+        Fn::Sub: "${AWS::StackName} SG"
+      VpcId:
+        Fn::ImportValue: ais-provided-vpc-VPCID
+      SecurityGroupEgress:
+        - Description: Allow all outbound traffic
+          IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: ref_architecture
+          Value: examples/3_instances
+        - Key: ref_architecture_tooling
+          Value: cft
+        - Key: ref_architecture_version
+          Value: "2020-12-03"
+        - Key: ref_architecture_instance_id
+          Value: !Ref "AWS::StackName"
+  DataAZ3InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - Ref: DataAZ3InstanceRole
+
+  DataAZ3InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - Fn::Sub: arn:aws:iam::${AWS::AccountId}:policy/AISSystemLogsPolicy
+        - Fn::Sub: arn:aws:iam::${AWS::AccountId}:policy/elastic-snapshot-testing-full
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/ais-permissions-boundaries"
+      Tags:
+        - Key: ref_architecture
+          Value: examples/3_instances
+        - Key: ref_architecture_tooling
+          Value: cft
+        - Key: ref_architecture_version
+          Value: "2020-12-03"
+        - Key: ref_architecture_instance_id
+          Value: !Ref "AWS::StackName"
+          
+  Outputs:
+  MasterASGName:
+    Description: Name of the Master Node ASG
+    Value: !Ref MasterASG
+  DataASGName:
+    Description: Name of the Data Node ASG
+    Value: !Ref DataASG
+  CoordinatorASGName:
+    Description: Name of the Coordinator Node ASG
+    Value: !Ref CoordinatorASG
+          

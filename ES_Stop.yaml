@@ -1,0 +1,48 @@
+schemaVersion: '2.2'
+description: >-
+  Elastic Search Rolling restart
+parameters:
+  commands:
+    type: String
+    description: "Disable replica shard allocation"
+    default: |
+      status=$(curl -sk -u 'elastic':'!X^QAqpCJ3#?#eB=892=_++v%sw*9B' 'https://100.127.3.178:9200/_cluster/health' | jq -r '.status')
+      echo "$status" > /tmp/cluster_status.txt
+      if [ "$status" = "green" ]; then
+        echo "Cluster status is green" >> /tmp/cluster_status.txt;
+      else
+        echo "Cluster status is not green, aborting" >> /tmp/cluster_status.txt;
+        exit 1;
+      fi
+      cat /tmp/cluster_status.txt
+      
+      acknowledged=$(curl -sk -u 'elastic':'!X^QAqpCJ3#?#eB=892=_++v%sw*9B' -XPUT -H "Content-Type: application/json" https://100.127.3.178:9200/_cluster/settings -d '{"persistent":{"cluster.routing.allocation.enable":"all"}}' | jq -r '.acknowledged')
+      echo "$acknowledged" > /tmp/acknowledged_status.txt
+      if [ "$acknowledged" = "true" ]; then
+        echo "Cluster settings updated successfully" >> /tmp/acknowledged_status.txt;
+      else
+        echo "Failed to update cluster settings, aborting" >> /tmp/acknowledged_status.txt;
+        exit 1;
+      fi
+      cat /tmp/acknowledged_status.txt
+
+      flush_response=$(curl -sk -u 'elastic':'!X^QAqpCJ3#?#eB=892=_++v%sw*9B' -XPOST -H "Content-Type: application/json" https://100.127.3.178:9200/_flush)
+      echo "$flush_response" > /tmp/flush_response.txt
+      if [ "$(echo "$flush_response" | jq -r '._shards.failed')" = "0" ]; then
+        echo "Flush operation successful" >> /tmp/flush_response.txt;
+      else
+        echo "Flush operation failed, aborting" >> /tmp/flush_response.txt;
+        exit 1;
+      fi
+      cat /tmp/flush_response.txt
+
+      CONTAINERS=$(docker ps -q)
+      if [ ! -z "$CONTAINERS" ]; then
+        docker stop $CONTAINERS
+      fi
+mainSteps:
+  - action: 'aws:runShellScript'
+    name: curlClusterHealth
+    inputs:
+      runCommand:
+        - "{{ commands }}"

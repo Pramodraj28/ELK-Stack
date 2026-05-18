@@ -1,0 +1,102 @@
+schemaVersion: '2.2'
+description: >-
+  Validate Elasticsearch cluster health, update settings, flush indices, stop Docker containers, reboot, ensure Docker containers start after reboot, enable shard allocation, and validate cluster status.
+parameters:
+  commands:
+    type: String
+    description: "A bunch of commands"
+    default: |
+      # Check cluster health
+      status=$(curl -sk -u 'elastic':'!X^QAqpCJ3#?#eB=892=_++v%sw*9B' 'https://100.127.3.178:9200/_cluster/health' | jq -r '.status')
+      echo "$status"
+      if [ "$status" = "green" ]; then
+        echo "Cluster status is green"
+      else
+        echo "Cluster status is not green, aborting"
+        exit 1
+      fi
+
+      # Update cluster settings
+      acknowledged=$(curl -sk -XPUT -H "Content-Type: application/json" \
+        https://100.127.3.178:9200/_cluster/settings -d \
+        '{"persistent":{"cluster.routing.allocation.enable":"primaries"}}' | jq -r '.acknowledged')
+      echo "$acknowledged"
+      if [ "$acknowledged" = "true" ]; then
+        echo "Cluster settings updated successfully"
+      else
+        echo "Failed to update cluster settings, aborting"
+        exit 1
+      fi
+
+      # Flush indices
+      flush_response=$(curl -sk -XPOST -H "Content-Type: application/json" \
+        https://100.127.3.178:9200/_flush)
+      echo "$flush_response"
+      if [ "$(echo "$flush_response" | jq -r '._shards.failed')" = "0" ]; then
+        echo "Flush operation successful"
+      else
+        echo "Flush operation failed, aborting"
+        exit 1
+      fi
+
+      # Stop Docker containers
+      CONTAINERS=$(docker ps -q)
+      if [ ! -z "$CONTAINERS" ]; then
+        docker stop $CONTAINERS
+      fi
+
+      # Reboot the machine
+      reboot
+
+mainSteps:
+  - action: 'aws:runShellScript'
+    name: curlClusterHealth
+    inputs:
+      runCommand:
+        - "{{ commands }}"
+
+  - action: 'aws:runShellScript'
+    name: checkAndStartDockerContainers
+    precondition:
+      StringEquals: ["platformType", "Linux"]
+    inputs:
+      runCommand:
+        - |
+          # Wait for the instance to reboot and be available
+          sleep 120
+          # Start stopped Docker containers
+          STOPPED_CONTAINERS=$(docker ps -a -q --filter "status=exited")
+          if [ ! -z "$STOPPED_CONTAINERS" ]; then
+            echo "Starting stopped Docker containers."
+            docker start $STOPPED_CONTAINERS
+          else
+            echo "No stopped Docker containers found."
+          fi
+
+  - action: 'aws:runShellScript'
+    name: enableShardsAndCheckCluster
+    precondition:
+      StringEquals: ["platformType", "Linux"]
+    inputs:
+      runCommand:
+        - |
+          # Enable shard allocation
+          shard_acknowledged=$(curl -sk -XPUT -H "Content-Type: application/json" \
+            https://100.127.3.178:9200/_cluster/settings -d \
+            '{"persistent":{"cluster.routing.allocation.enable":"all"}}' | jq -r '.acknowledged')
+          echo "$shard_acknowledged"
+          if [ "$shard_acknowledged" = "true" ]; then
+            echo "Shard allocation enabled successfully"
+          else
+            echo "Failed to enable shard allocation, aborting"
+            exit 1
+          fi
+
+          # Check cluster status until it becomes green
+          STATUS=""
+          while [ "$STATUS" != "green" ]; do
+              STATUS=$(curl -sk -u 'elastic':'!X^QAqpCJ3#?#eB=892=_++v%sw*9B' https://100.127.3.178:9200/_cluster/health | jq -r '.status')
+              echo "$(date): Cluster status is $STATUS"
+              sleep 60
+          done
+          echo "Cluster status is green. Script successful."

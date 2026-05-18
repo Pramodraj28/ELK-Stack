@@ -1,0 +1,105 @@
+schemaVersion: '2.2'
+description: >-
+  Validate Elasticsearch cluster health, update settings, flush indices, stop Docker containers, reboot, ensure Docker containers start after reboot, enable shard allocation, and validate cluster status.
+parameters:
+  commands:
+    type: String
+    description: "Disable replica shard allocation"
+    default: |
+      status=$(curl -sk -u 'elastic':'!X^QAqpCJ3#?#eB=892=_++v%sw*9B' 'https://100.127.3.178:9200/_cluster/health' | jq -r '.status')
+      echo "$status" > /tmp/cluster_status.txt
+      if [ "$status" = "green" ]; then
+        echo "Cluster status is green" >> /tmp/cluster_status.txt;
+      else
+        echo "Cluster status is not green, aborting" >> /tmp/cluster_status.txt;
+        exit 1;
+      fi
+      cat /tmp/cluster_status.txt
+      
+      acknowledged=$(curl -sk -u 'elastic':'!X^QAqpCJ3#?#eB=892=_++v%sw*9B' -XPUT -H "Content-Type: application/json" https://100.127.3.178:9200/_cluster/settings -d '{"persistent":{"cluster.routing.allocation.enable":"all"}}' | jq -r '.acknowledged')
+      echo "$acknowledged" > /tmp/acknowledged_status.txt
+      if [ "$acknowledged" = "true" ]; then
+        echo "Cluster settings updated successfully" >> /tmp/acknowledged_status.txt;
+      else
+        echo "Failed to update cluster settings, aborting" >> /tmp/acknowledged_status.txt;
+        exit 1;
+      fi
+      cat /tmp/acknowledged_status.txt
+
+      flush_response=$(curl -sk -u 'elastic':'!X^QAqpCJ3#?#eB=892=_++v%sw*9B' -XPOST -H "Content-Type: application/json" https://100.127.3.178:9200/_flush)
+      echo "$flush_response" > /tmp/flush_response.txt
+      if [ "$(echo "$flush_response" | jq -r '._shards.failed')" = "0" ]; then
+        echo "Flush operation successful" >> /tmp/flush_response.txt;
+      else
+        echo "Flush operation failed, aborting" >> /tmp/flush_response.txt;
+        exit 1;
+      fi
+      cat /tmp/flush_response.txt
+
+      CONTAINERS=$(docker ps -q)
+      if [ ! -z "$CONTAINERS" ]; then
+        docker stop $CONTAINERS
+      fi
+
+      # Reboot the machine
+      # reboot
+
+mainSteps:
+  - action: 'aws:runShellScript'
+    name: curlClusterHealth
+    inputs:
+      runCommand:
+        - "{{ commands }}"
+
+  - action: 'aws:runShellScript'
+    name: checkAndStartDockerContainers
+    precondition:
+      StringEquals: ["platformType", "Linux"]
+    inputs:
+      runCommand:
+        - |
+          # Wait for the instance to reboot and be available
+          sleep 120
+          # Start stopped Docker containers
+          STOPPED_CONTAINERS=$(docker ps -a -q --filter "status=exited")
+          if [ ! -z "$STOPPED_CONTAINERS" ]; then
+            echo "Starting stopped Docker containers."
+            docker start $STOPPED_CONTAINERS
+          else
+            echo "No stopped Docker containers found."
+          fi
+
+  - action: 'aws:runShellScript'
+    name: enableShardsAndCheckCluster
+    precondition:
+      StringEquals: ["platformType", "Linux"]
+    inputs:
+      runCommand:
+        - |
+          CONTAINERS=$(docker ps -a -q --filter "status=exited")
+          if [ ! -z "$CONTAINERS" ]; then
+            echo "Starting stopped Docker containers."  >> /tmp/Docker_status.txt;
+            docker start $CONTAINERS
+          else
+            echo "No stopped Docker containers found." >> /tmp/Docker_status.txt;
+          fi
+           # Enable shard allocation
+          shard_acknowledged=$(curl -sk -u 'elastic':'!X^QAqpCJ3#?#eB=892=_++v%sw*9B' -XPUT -H "Content-Type: application/json" https://100.127.3.178:9200/_cluster/settings -d '{"persistent":{"cluster.routing.allocation.enable":"all"}}' | jq -r '.acknowledged')
+          echo "$shard_acknowledged" > /tmp/shard_enabled_status.txt
+          if [ "$shard_acknowledged" = "true" ]; then
+            echo "Shard allocation enabled successfully" >> /tmp/shard_enabled_status.txt;
+          else
+            echo "Failed to enable shard allocation, aborting" >> /tmp/shard_enabled_status.txt;
+            exit 1;
+          fi
+          cat /tmp/shard_enabled_status.txt
+
+          # Check cluster status until it becomes green
+          STATUS=""
+          while [ "$STATUS" != "green" ]; do
+              STATUS=$(curl -sk -u 'elastic':'!X^QAqpCJ3#?#eB=892=_++v%sw*9B' https://100.127.3.178:9200/_cluster/health | jq -r '.status')
+              echo "$(date): Cluster status is $STATUS"
+              sleep 60
+          done
+          echo "Cluster status is green. Script successful." > /tmp/final_status.txt
+          cat /tmp/final_status.txt
