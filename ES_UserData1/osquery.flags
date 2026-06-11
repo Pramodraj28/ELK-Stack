@@ -1,0 +1,8 @@
+--tls_hostname=osqueryd.dslb.apple.com
+--config_plugin=tls
+--config_tls_endpoint=/config?extensions.ais_audit_client=1&host=i-instance-id&module.osquery.os=linux&module.osquery.group=837639066216&module.osquery.owner=insight_sa@group.apple.com
+--config_tls_max_attempts=10
+--config_refresh=1800
+--enroll_tls_endpoint=/enroll
+--disable_extensions=false
+--extension=/var/osquery/extensions/ais_audit_client.ext

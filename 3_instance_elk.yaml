@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: Stack creates ASGs with labeled nodes for manual scaling
+Description: Stack creates 3 instances in 3az's 
 Transform: AppleTaggingStandard
 
 Parameters:
@@ -19,19 +19,19 @@ Parameters:
   IsDenaliEnabled:
     Type: String
     Default: true
-    
+
 Conditions:
   IsDenaliEnabled: !Equals
     - !Ref IsDenaliEnabled
     - "true"
-    
+
 Resources:
-  # Master Node ASG
-  MasterASG:
-    Type: AWS::AutoScaling::AutoScalingGroup
+  # The DataAZ1 Instance
+  DataAZ1EC2Instance:
+    Type: AWS::EC2::Instance
     Properties:
-    IamInstanceProfile:
-        Ref: MasterASGAZ1InstanceProfile
+      IamInstanceProfile:
+        Ref: DataAZ1InstanceProfile
       ImageId:
         Ref: ImageId
       InstanceType:
@@ -43,28 +43,30 @@ Resources:
             VolumeSize: '30'
             DeleteOnTermination: 'false'
             Encrypted: 'true'
-     LaunchTemplate:
+      LaunchTemplate:
         LaunchTemplateId: !Ref EC2LaunchTemplate
         Version: !GetAtt EC2LaunchTemplate.LatestVersionNumber
-      MinSize: 1
-      MaxSize: 1
-      DesiredCapacity: 1
-      VPCZoneIdentifier:
-        - !If
-          - IsDenaliEnabled
-          - "{{resolve:ssm:/GNCS/0/Vpcs/0/denali-provided-private-subnet/1:Id}}"
-          - !ImportValue: "Fn::Sub": "ais-provided-vpc-PrivSubnet${AZNumber}"
       SecurityGroupIds:
         - Fn::ImportValue: ais-shared-services-sg-SS-SG
-        - Ref: MasterASGAZ1SecurityGroup
-      TargetGroupARNs:
-        - Ref: TargetGroup: !Sub "${AWS::StackName}-MasterElastic TG"
+        - Ref: DataAZ1SecurityGroup
+      SubnetId: !If
+        - IsDenaliEnabled
+        - "{{resolve:ssm:/GNCS/0/Vpcs/0/denali-provided-private-subnet/0/Id:1}}"
+        - !ImportValue
+          "Fn::Sub": "ais-provided-vpc-PrivSubnet${AZNumber}"        
       Tags:
         - Key: Name
-          Value: !Sub "${AWS::StackName}-master-asg"
-        - Key: Node_Type
-          Value: Master 
-            UserData:
+          Value:
+            Fn::Sub: "${AWS::StackName}-az1"
+        - Key: ref_architecture
+          Value: examples/3_instances
+        - Key: ref_architecture_tooling
+          Value: cft
+        - Key: ref_architecture_version
+          Value: "2020-12-03"
+        - Key: ref_architecture_instance_id
+          Value: !Ref "AWS::StackName"
+      UserData:
         Fn::Base64: |
           #! /bin/bash
           set -eux          
@@ -145,7 +147,16 @@ Resources:
           systemctl enable osqueryd.service
           systemctl restart osqueryd.service
 
-  MasterAZ1SecurityGroup:
+  EC2LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpPutResponseHopLimit: 2
+          HttpTokens: required
+
+  DataAZ1SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription:
@@ -165,13 +176,13 @@ Resources:
           Value: "2020-12-03"
         - Key: ref_architecture_instance_id
           Value: !Ref "AWS::StackName"
-  MasterASGAZ1InstanceProfile:
+  DataAZ1InstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
       Roles:
-        - Ref: MasterASGAZ1InstanceRole
+        - Ref: DataAZ1InstanceRole
 
-  MasterASGAZ1InstanceRole:
+  DataAZ1InstanceRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -197,10 +208,10 @@ Resources:
           Value: "2020-12-03"
         - Key: ref_architecture_instance_id
           Value: !Ref "AWS::StackName"
-          
-  # Data Node ASG
-  DataASG:
-    Type: AWS::AutoScaling::AutoScalingGroup
+
+  # The DataAZ2 Instance
+  DataAZ2EC2Instance:
+    Type: AWS::EC2::Instance
     Properties:
       IamInstanceProfile:
         Ref: DataAZ2InstanceProfile
@@ -218,24 +229,26 @@ Resources:
       LaunchTemplate:
         LaunchTemplateId: !Ref EC2LaunchTemplate
         Version: !GetAtt EC2LaunchTemplate.LatestVersionNumber
-      MinSize: 12
-      MaxSize: 12
-      DesiredCapacity: 12
-      VPCZoneIdentifier:
-        - !If
-          - IsDenaliEnabled
-          - "{{resolve:ssm:/GNCS/0/Vpcs/0/denali-provided-private-subnet/1:Id}}"
-          - !ImportValue: "Fn::Sub": "ais-provided-vpc-PrivSubnet${AZNumber}"
       SecurityGroupIds:
         - Fn::ImportValue: ais-shared-services-sg-SS-SG
         - Ref: DataAZ2SecurityGroup
-      TargetGroupARNs:
-        - Ref: TargetGroup: !Sub "${AWS::StackName}-DataElastic TG"
+      SubnetId: !If
+        - IsDenaliEnabled
+        - "{{resolve:ssm:/GNCS/0/Vpcs/0/denali-provided-private-subnet/1/Id:1}}"
+        - !ImportValue
+          "Fn::Sub": "ais-provided-vpc-PrivSubnet${AZNumber}"
       Tags:
         - Key: Name
-          Value: !Sub "${AWS::StackName}-data-asg"
-        - Key: Node_Type
-          Value: hot
+          Value:
+            Fn::Sub: "${AWS::StackName}-az2"
+        - Key: ref_architecture
+          Value: examples/3_instances
+        - Key: ref_architecture_tooling
+          Value: cft
+        - Key: ref_architecture_version
+          Value: "2020-12-03"
+        - Key: ref_architecture_instance_id
+          Value: !Ref "AWS::StackName"
       UserData:
         Fn::Base64: !Sub |
           #! /bin/bash
@@ -365,13 +378,13 @@ Resources:
           Value: "2020-12-03"
         - Key: ref_architecture_instance_id
           Value: !Ref "AWS::StackName"
-  
-  # Coordinator Node ASG
-  CoordinatorASG:
-    Type: AWS::AutoScaling::AutoScalingGroup
+
+  # The DataAZ3 Instance
+  DataAZ3EC2Instance:
+    Type: AWS::EC2::Instance
     Properties:
       IamInstanceProfile:
-        Ref: CoordinatorAZ3InstanceProfile
+        Ref: DataAZ3InstanceProfile
       ImageId:
         Ref: ImageId
       InstanceType:
@@ -386,23 +399,26 @@ Resources:
       LaunchTemplate:
         LaunchTemplateId: !Ref EC2LaunchTemplate
         Version: !GetAtt EC2LaunchTemplate.LatestVersionNumber
-      MinSize: 1
-      MaxSize: 1
-      DesiredCapacity: 1
-      VPCZoneIdentifier:
-        - !If
-          - IsDenaliEnabled
-          - "{{resolve:ssm:/GNCS/0/Vpcs/0/denali-provided-private-subnet/1:Id}}"
-          - !ImportValue: "Fn::Sub": "ais-provided-vpc-PrivSubnet${AZNumber}"
       SecurityGroupIds:
         - Fn::ImportValue: ais-shared-services-sg-SS-SG
-        - Ref: AZ3SecurityGroup
+        - Ref: DataAZ3SecurityGroup
+      SubnetId: !If
+        - IsDenaliEnabled
+        - "{{resolve:ssm:/GNCS/0/Vpcs/0/denali-provided-private-subnet/2/Id:1}}"
+        - !ImportValue
+          "Fn::Sub": "ais-provided-vpc-PrivSubnet${AZNumber}"
       Tags:
         - Key: Name
-          Value: !Sub "${AWS::StackName}-coordinator-asg"
-        - Key: Node_Type
-          Value: Coordinator
-      
+          Value:
+            Fn::Sub: "${AWS::StackName}-az3"
+        - Key: ref_architecture
+          Value: examples/3_instances
+        - Key: ref_architecture_tooling
+          Value: cft
+        - Key: ref_architecture_version
+          Value: "2020-12-03"
+        - Key: ref_architecture_instance_id
+          Value: !Ref "AWS::StackName"
       UserData:
         Fn::Base64: !Sub |
           #! /bin/bash
@@ -534,15 +550,20 @@ Resources:
           Value: "2020-12-03"
         - Key: ref_architecture_instance_id
           Value: !Ref "AWS::StackName"
-          
-  Outputs:
-  MasterASGName:
-    Description: Name of the Master Node ASG
-    Value: !Ref MasterASG
-  DataASGName:
-    Description: Name of the Data Node ASG
-    Value: !Ref DataASG
-  CoordinatorASGName:
-    Description: Name of the Coordinator Node ASG
-    Value: !Ref CoordinatorASG
-          
+
+Outputs:
+  DataAZ1InstanceID:
+    Description: The DataAZ1 Instance ID
+    Value: !Ref DataAZ1EC2Instance
+    Export:
+      Name: !Sub "${AWS::StackName}-az1"
+  DataAZ2InstanceID:
+    Description: The DataAZ2 Instance ID
+    Value: !Ref DataAZ2EC2Instance
+    Export:
+      Name: !Sub "${AWS::StackName}-az2"
+  DataAZ3InstanceID:
+    Description: The DataAZ3 Instance ID
+    Value: !Ref DataAZ3EC2Instance
+    Export:
+      Name: !Sub "${AWS::StackName}-az3"      

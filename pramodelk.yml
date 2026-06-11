@@ -24,13 +24,136 @@ Conditions:
   IsDenaliEnabled: !Equals
     - !Ref IsDenaliEnabled
     - "true"
-    
+
 Resources:
-  # Master Node ASG
-  MasterASG:
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      scheme: internel 
+      Type: network
+      Subnets: 
+        - !If
+          - IsDenaliEnabled
+          - "{{resolve:ssm:/GNCS/0/Vpcs/0/denali-provided-private-subnet/1:Id}}"
+          - !ImportValue: "Fn::Sub": "ais-provided-vpc-PrivSubnet${AZNumber}"
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${AWS::StackName} Elastic Search Load Balancer"
+        - Key: Privatelinks
+          Value: to be exposed via privatelinks
+        - Key: ref_architecture
+          Value: examples/Elasticsearch_asg_nlb/nlb
+        - Key: ref_architecture_tooling
+          Value: cft
+        - Key: ref_architecture_version
+          Value: "2020-12-03"
+        - Key: ref_architecture_instance_id
+          Value: !Ref "AWS::StackName"
+      LoadBalancerAttributes:
+        - Key: load_balancing.cross_zone.enabled
+          Value: "true"
+          
+# Target Groups
+  - Name: MasterTargetGroup
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${AWS::StackName}-Master-TG"
+      Port: 9100
+      Protocol: TCP
+      HealthCheckPort: "9100"  # Replace if health check uses different port
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "20"
+      VpcId: !ImportValue ais-provided-vpc-VPCID
+      Tags:
+        - Key: ref_architecture
+          Value: examples/Elasticsearch_asg_nlb/nlb
+        - Key: ref_architecture_tooling
+          Value: cft
+        - Key: ref_architecture_version
+          Value: "2020-12-03"
+        - Key: ref_architecture_instance_id
+          Value: !Ref "AWS::StackName"
+
+  - Name: DataTargetGroup
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${AWS::StackName}-Data-TG"
+      Port: 9200
+      Protocol: TCP
+      HealthCheckPort: "9200"  # Replace if health check uses different port
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "20"
+      VpcId: !ImportValue ais-provided-vpc-VPCID
+      Tags:
+        - Key: ref_architecture
+          Value: examples/Elasticsearch_asg_nlb/nlb
+        - Key: ref_architecture_tooling
+          Value: cft
+        - Key: ref_architecture_version
+          Value: "2020-12-03"
+        - Key: ref_architecture_instance_id
+          Value: !Ref "AWS::StackName"
+          
+  - Name: CoordinatorTargetGroup
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${AWS::StackName}-Coordinator-TG"
+      Port: 9300
+      Protocol: TCP
+      HealthCheckPort: "9300"  # Replace if health check uses different port
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "20"
+      VpcId: !ImportValue ais-provided-vpc-VPCID
+      Tags:
+        - Key: ref_architecture
+          Value: examples/Elasticsearch_asg_nlb/nlb
+        - Key: ref_architecture_tooling
+          Value: cft
+        - Key: ref_architecture_version
+          Value: "2020-12-03"
+        - Key: ref_architecture_instance_id
+          Value: !Ref "AWS::StackName"
+          
+# Listeners
+  - Name: MasterListener
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref MasterTargetGroup
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 9100
+      Protocol: TCP
+
+  - Name: DataListener
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref DataTargetGroup
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 9200
+      Protocol: TCP
+
+  - Name: CoordinatorListener
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref CoordinatorTargetGroup
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 9300
+      Protocol: TCP
+      
+# Auto Scaling Groups
+ MasterASG
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
-    IamInstanceProfile:
+        IamInstanceProfile:
         Ref: MasterASGAZ1InstanceProfile
       ImageId:
         Ref: ImageId
@@ -56,9 +179,9 @@ Resources:
           - !ImportValue: "Fn::Sub": "ais-provided-vpc-PrivSubnet${AZNumber}"
       SecurityGroupIds:
         - Fn::ImportValue: ais-shared-services-sg-SS-SG
-        - Ref: MasterASGAZ1SecurityGroup
+        - Ref: MasterSecurityGroup
       TargetGroupARNs:
-        - Ref: TargetGroup: !Sub "${AWS::StackName}-MasterElastic TG"
+        - !Ref TargetGroup1
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-master-asg"
@@ -145,7 +268,7 @@ Resources:
           systemctl enable osqueryd.service
           systemctl restart osqueryd.service
 
-  MasterAZ1SecurityGroup:
+  MasterSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription:
@@ -158,20 +281,20 @@ Resources:
           CidrIp: 0.0.0.0/0
       Tags:
         - Key: ref_architecture
-          Value: examples/3_instances
+          Value: Master_Node
         - Key: ref_architecture_tooling
           Value: cft
         - Key: ref_architecture_version
           Value: "2020-12-03"
         - Key: ref_architecture_instance_id
           Value: !Ref "AWS::StackName"
-  MasterASGAZ1InstanceProfile:
+  MasterInstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
       Roles:
-        - Ref: MasterASGAZ1InstanceRole
+        - Ref: MasterInstanceRole
 
-  MasterASGAZ1InstanceRole:
+  MasterInstanceRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -190,7 +313,7 @@ Resources:
       PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/ais-permissions-boundaries"
       Tags:
         - Key: ref_architecture
-          Value: examples/3_instances
+          Value: Master_Node
         - Key: ref_architecture_tooling
           Value: cft
         - Key: ref_architecture_version
@@ -198,12 +321,11 @@ Resources:
         - Key: ref_architecture_instance_id
           Value: !Ref "AWS::StackName"
           
-  # Data Node ASG
-  DataASG:
+  DataASG
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
-      IamInstanceProfile:
-        Ref: DataAZ2InstanceProfile
+    IamInstanceProfile:
+        Ref: DataInstanceProfile
       ImageId:
         Ref: ImageId
       InstanceType:
@@ -218,9 +340,9 @@ Resources:
       LaunchTemplate:
         LaunchTemplateId: !Ref EC2LaunchTemplate
         Version: !GetAtt EC2LaunchTemplate.LatestVersionNumber
-      MinSize: 12
-      MaxSize: 12
-      DesiredCapacity: 12
+      MinSize: 1
+      MaxSize: 1
+      DesiredCapacity: 1
       VPCZoneIdentifier:
         - !If
           - IsDenaliEnabled
@@ -228,9 +350,9 @@ Resources:
           - !ImportValue: "Fn::Sub": "ais-provided-vpc-PrivSubnet${AZNumber}"
       SecurityGroupIds:
         - Fn::ImportValue: ais-shared-services-sg-SS-SG
-        - Ref: DataAZ2SecurityGroup
+        - Ref: DataSecurityGroup
       TargetGroupARNs:
-        - Ref: TargetGroup: !Sub "${AWS::StackName}-DataElastic TG"
+        - !Ref TargetGroup
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-data-asg"
@@ -313,7 +435,7 @@ Resources:
           systemctl enable osqueryd.service
           systemctl restart osqueryd.service
 
-  DataAZ2SecurityGroup:
+  DataSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription:
@@ -333,13 +455,13 @@ Resources:
           Value: "2020-12-03"
         - Key: ref_architecture_instance_id
           Value: !Ref "AWS::StackName"
-  DataAZ2InstanceProfile:
+  DataInstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
       Roles:
-        - Ref: DataAZ2InstanceRole
+        - Ref: DataInstanceRole
 
-  DataAZ2InstanceRole:
+  DataInstanceRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -358,20 +480,19 @@ Resources:
       PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/ais-permissions-boundaries"
       Tags:
         - Key: ref_architecture
-          Value: examples/3_instances
+          Value: Data Node
         - Key: ref_architecture_tooling
           Value: cft
         - Key: ref_architecture_version
           Value: "2020-12-03"
         - Key: ref_architecture_instance_id
           Value: !Ref "AWS::StackName"
-  
-  # Coordinator Node ASG
-  CoordinatorASG:
+          
+  CoordinatorASG
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
-      IamInstanceProfile:
-        Ref: CoordinatorAZ3InstanceProfile
+    IamInstanceProfile:
+        Ref: CoordinatorInstanceProfile
       ImageId:
         Ref: ImageId
       InstanceType:
@@ -396,10 +517,12 @@ Resources:
           - !ImportValue: "Fn::Sub": "ais-provided-vpc-PrivSubnet${AZNumber}"
       SecurityGroupIds:
         - Fn::ImportValue: ais-shared-services-sg-SS-SG
-        - Ref: AZ3SecurityGroup
+        - Ref: CoordinatorAZ3SecurityGroup
+      TargetGroupARNs:
+        - !Ref TargetGroup3
       Tags:
         - Key: Name
-          Value: !Sub "${AWS::StackName}-coordinator-asg"
+          Value: !Sub "${AWS::StackName}-co-asg"
         - Key: Node_Type
           Value: Coordinator
       
@@ -482,7 +605,7 @@ Resources:
           systemctl enable osqueryd.service
           systemctl restart osqueryd.service
 
-  DataAZ3SecurityGroup:
+  CoordinatorSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription:
@@ -495,20 +618,20 @@ Resources:
           CidrIp: 0.0.0.0/0
       Tags:
         - Key: ref_architecture
-          Value: examples/3_instances
+          Value: Coordinator Node
         - Key: ref_architecture_tooling
           Value: cft
         - Key: ref_architecture_version
           Value: "2020-12-03"
         - Key: ref_architecture_instance_id
           Value: !Ref "AWS::StackName"
-  DataAZ3InstanceProfile:
+  CoordinatorInstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
       Roles:
-        - Ref: DataAZ3InstanceRole
+        - Ref: CoordinatorInstanceRole
 
-  DataAZ3InstanceRole:
+  CoordinatorInstanceRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -527,22 +650,32 @@ Resources:
       PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/ais-permissions-boundaries"
       Tags:
         - Key: ref_architecture
-          Value: examples/3_instances
+          Value: Coordinator_Node
         - Key: ref_architecture_tooling
           Value: cft
         - Key: ref_architecture_version
           Value: "2020-12-03"
         - Key: ref_architecture_instance_id
-          Value: !Ref "AWS::StackName"
+          Value: !Ref "AWS::StackName
           
-  Outputs:
-  MasterASGName:
-    Description: Name of the Master Node ASG
-    Value: !Ref MasterASG
-  DataASGName:
-    Description: Name of the Data Node ASG
-    Value: !Ref DataASG
-  CoordinatorASGName:
-    Description: Name of the Coordinator Node ASG
-    Value: !Ref CoordinatorASG
-          
+Outputs:
+
+  MasterTargetGroupArn:
+    Description: ARN of the target group for master nodes
+    Value: !Ref MasterTargetGroup
+  DataTargetGroupArn:
+    Description: ARN of the target group for data nodes
+    Value: !Ref DataTargetGroup
+  CoordinatorTargetGroupArn:
+    Description: ARN of the target group for coordinator nodes
+    Value: !Ref CoordinatorTargetGroup
+
+  MasterListenerArn:
+    Description: ARN of the listener for master node traffic (port 9100)
+    Value: !Ref MasterListener
+  DataListenerArn:
+    Description: ARN of the listener for data node traffic (port 9200)
+    Value: !Ref DataListener
+  CoordinatorListenerArn:
+    Description: ARN of the listener for coordinator node traffic (port 9300)
+    Value: !Ref CoordinatorListener
